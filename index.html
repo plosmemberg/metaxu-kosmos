@@ -247,6 +247,14 @@ main.ancha{max-width:none;width:min(1180px,94vw)}
 /* pantallas bajas (notebooks): las dos cartas lado a lado, más grandes */
 @media (min-width:901px) and (max-height:859px){main.ancha,.barra__int{width:min(1280px,94vw);max-width:none}.layout{grid-template-columns:minmax(400px,1.4fr) 2fr;gap:36px}.cartas2{grid-template-columns:1fr 1fr;gap:18px;align-items:start}.cartas2 .carta{width:min(100%,270px,calc((100vh - 285px)*63/88))}.ranura .btn{padding:.55em .9em;font-size:.92rem;min-height:40px}}
 @media (max-width:900px){.layout{grid-template-columns:1fr}.col-cartas{position:static}.cartas2 .carta{width:min(100%,230px)}}
+.musica{position:fixed;right:14px;bottom:calc(12px + env(safe-area-inset-bottom,0px));z-index:6;display:flex;align-items:center;gap:6px;background:rgba(255,255,255,.94);border:1px solid var(--linea);border-radius:999px;padding:3px 12px 3px 3px}
+.musica__boton{width:34px;height:34px;border:0;border-radius:50%;background:none;color:var(--negro);cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
+.musica__boton svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.musica__boton svg path:first-child{fill:currentColor}
+.musica input{width:78px;accent-color:var(--negro);cursor:pointer}
+.musica[hidden]{display:none}
+.musica.apagada{opacity:.55}.musica.apagada:hover,.musica.apagada:focus-within{opacity:1}
+@media print{.musica{display:none}}
 </style>
 </head>
 <body>
@@ -255,6 +263,299 @@ main.ancha{max-width:none;width:min(1180px,94vw)}
 <main id="vista" tabindex="-1"></main>
 <footer id="pie" hidden>METAXU: <em>kósmos</em></footer>
 <div class="aviso-guardado" id="guardado" role="status">Guardando…</div>
+<div class="musica" id="musica"><button class="musica__boton" id="musica-boton" type="button"></button><input type="range" id="musica-vol" min="0" max="100" step="1" aria-label="Volumen de la música"></div>
+<script>
+/* MUSICA: inicio */
+/* Música de Metaxu: kósmos.
+   Pieza generativa propia: no hay archivo de audio, la app la sintetiza mientras suena.
+   Un mismo tema (re menor, 84 por minuto) armado en capas: colchón de acordes, bajo,
+   arpegios, melodía, campanas y aire. Cada ciclo de ocho compases las capas entran,
+   se superponen o salen al azar; los arpegios y los motivos de la melodía se eligen
+   y se combinan de un repertorio fijo, así que nunca suena dos veces igual.
+   Vive acá, entre las marcas MUSICA. La herramienta musica_muestra.py la extrae para grabar muestras.
+   Uso:  const m = MetaxuMusica.crear(ctx, ctx.destination, {semilla});
+         m.iniciar(); m.volumen(0.5); m.detener();                                  */
+(function (G) {
+  "use strict";
+
+  function azar(semilla) {
+    let s = (semilla >>> 0) || 0x9e3779b9;
+    return function () { s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0; return s / 4294967296; };
+  }
+  const hz = (m) => 440 * Math.pow(2, (m - 69) / 12);
+
+  /* Armonía. b: bajo; p: voces del colchón; t: notas para arpegios y melodía. */
+  const ACORDES = {
+    Dm9:    { b: 38, p: [50, 53, 57, 60, 64], t: [62, 65, 69, 72, 74, 76] },
+    Bbmaj9: { b: 46, p: [50, 53, 57, 60, 65], t: [62, 65, 69, 70, 74, 77] },
+    Gm9:    { b: 43, p: [50, 53, 57, 58, 62], t: [62, 65, 67, 70, 74, 77] },
+    Asus:   { b: 45, p: [50, 52, 55, 57, 64], t: [62, 64, 67, 69, 74, 76] },
+    A7:     { b: 45, p: [49, 52, 55, 57, 64], t: [61, 64, 67, 69, 73, 76] },
+    Fmaj7:  { b: 41, p: [48, 52, 53, 57, 60], t: [60, 64, 65, 69, 72, 76] },
+  };
+  /* Dos recorridos de ocho compases (un acorde cada dos compases). */
+  const RECORRIDOS = [
+    ["Dm9", "Dm9", "Bbmaj9", "Bbmaj9", "Gm9", "Gm9", "Asus", "A7"],
+    ["Bbmaj9", "Bbmaj9", "Fmaj7", "Fmaj7", "Gm9", "Gm9", "Dm9", "Asus"],
+  ];
+  /* Arpegios: índices sobre t (6 = octava arriba); null es silencio. Ocho corcheas. */
+  const ARPEGIOS = [
+    [0, 2, 4, 2, 1, 3, 5, 3],
+    [0, 1, 2, 3, 4, 5, 4, 3],
+    [0, null, 2, null, 4, null, 3, null],
+    [5, 4, 2, 4, 3, 1, 2, 0],
+    [0, 2, 4, 6, 4, 2, 1, 3],
+    [2, 0, 3, 1, 4, 2, 5, 3],
+  ];
+  /* Motivos de la melodía: [índice sobre t, duración en tiempos]. Cada uno ocupa un compás. */
+  const MOTIVOS = [
+    [[4, 1], [3, 0.5], [2, 0.5], [1, 2]],
+    [[2, 1.5], [3, 0.5], [4, 2]],
+    [[5, 3], [4, 1]],
+    [[1, 0.5], [2, 0.5], [4, 1], [3, 2]],
+    [[4, 2], [5, 1], [4, 1]],
+    [[2, 4]],
+    [[3, 1], [2, 1], [1, 1], [0, 1]],
+  ];
+
+  const BPM = 84, TIEMPO = 60 / BPM, COMPAS = TIEMPO * 4, CICLO = COMPAS * 8;
+
+  function crear(ctx, destino, op) {
+    op = op || {};
+    const r = azar(op.semilla == null ? (Date.now() & 0xffffffff) : op.semilla);
+    const elegir = (a) => a[Math.floor(r() * a.length)];
+
+    /* ---- cadena de salida */
+    const mezcla = ctx.createGain(); mezcla.gain.value = 0.9;
+    const sat = ctx.createWaveShaper();
+    const curva = new Float32Array(1024);
+    for (let i = 0; i < 1024; i++) { const x = i / 511.5 - 1; curva[i] = Math.tanh(1.4 * x) / Math.tanh(1.4); }
+    sat.curve = curva;
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -20; comp.ratio.value = 3; comp.attack.value = 0.03; comp.release.value = 0.4;
+    const tono = ctx.createBiquadFilter(); tono.type = "lowpass"; tono.frequency.value = 8500;
+    const maestro = ctx.createGain(); maestro.gain.value = 0;
+    mezcla.connect(sat); sat.connect(comp); comp.connect(tono); tono.connect(maestro); maestro.connect(destino);
+
+    /* ---- reverberación generada (sin archivos) */
+    const rev = ctx.createConvolver();
+    {
+      const sr = ctx.sampleRate, n = Math.floor(sr * 5.5), ir = ctx.createBuffer(2, n, sr);
+      for (let c = 0; c < 2; c++) {
+        const d = ir.getChannelData(c); let y = 0;
+        for (let i = 0; i < n; i++) {
+          const x = (r() * 2 - 1); y = y + 0.35 * (x - y);
+          d[i] = y * Math.pow(1 - i / n, 2.6) * (i < sr * 0.02 ? i / (sr * 0.02) : 1);
+        }
+      }
+      rev.buffer = ir;
+    }
+    const revVuelta = ctx.createGain(); revVuelta.gain.value = 0.55;
+    rev.connect(revVuelta); revVuelta.connect(mezcla);
+
+    /* ---- eco estéreo (corchea con puntillo) */
+    const ecoEnt = ctx.createGain(); ecoEnt.gain.value = 1;
+    const ecoI = ctx.createDelay(2), ecoD = ctx.createDelay(2);
+    ecoI.delayTime.value = TIEMPO * 0.75; ecoD.delayTime.value = TIEMPO * 1.5;
+    const ecoFiltro = ctx.createBiquadFilter(); ecoFiltro.type = "lowpass"; ecoFiltro.frequency.value = 2400;
+    const ecoVuelta = ctx.createGain(); ecoVuelta.gain.value = 0.38;
+    const panI = ctx.createStereoPanner(), panD = ctx.createStereoPanner(); panI.pan.value = -0.6; panD.pan.value = 0.6;
+    ecoEnt.connect(ecoFiltro); ecoFiltro.connect(ecoI); ecoFiltro.connect(ecoD);
+    ecoI.connect(panI); ecoD.connect(panD);
+    const ecoSal = ctx.createGain(); ecoSal.gain.value = 0.32;
+    panI.connect(ecoSal); panD.connect(ecoSal); ecoSal.connect(mezcla); ecoSal.connect(rev);
+    ecoD.connect(ecoVuelta); ecoVuelta.connect(ecoFiltro);
+
+    /* ---- capas */
+    function capa(nivel, envioRev, envioEco) {
+      const g = ctx.createGain(); g.gain.value = 0;
+      const sal = ctx.createGain(); sal.gain.value = nivel;
+      g.connect(sal); sal.connect(mezcla);
+      if (envioRev) { const s = ctx.createGain(); s.gain.value = envioRev; sal.connect(s); s.connect(rev); }
+      if (envioEco) { const s = ctx.createGain(); s.gain.value = envioEco; sal.connect(s); s.connect(ecoEnt); }
+      return { g, on: false, antes: false };
+    }
+    const C = {
+      colchon: capa(1.6, 0.6, 0),
+      bajo: capa(0.18, 0.15, 0),
+      arpegio: capa(0.82, 0.45, 0.8),
+      melodia: capa(0.2, 0.7, 0.6),
+      campanas: capa(0.5, 0.9, 0.5),
+      aire: capa(0.074, 0.8, 0),
+    };
+
+    /* ---- timbres */
+    const ondaSuave = ctx.createPeriodicWave(
+      new Float32Array([0, 0, 0, 0, 0, 0, 0]),
+      new Float32Array([0, 1, 0.42, 0.2, 0.09, 0.05, 0.02]));
+
+    function colchon(t, a, dur) {
+      const f = ctx.createBiquadFilter(); f.type = "lowpass"; f.Q.value = 0.6;
+      f.frequency.setValueAtTime(650, t); f.frequency.linearRampToValueAtTime(1350 + r() * 500, t + dur * 0.6);
+      f.frequency.linearRampToValueAtTime(800, t + dur + 3);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(1, t + 2.4);
+      g.gain.setValueAtTime(1, t + dur); g.gain.linearRampToValueAtTime(0, t + dur + 3.4);
+      f.connect(g); g.connect(C.colchon.g);
+      a.p.forEach((m, i) => {
+        const pan = ctx.createStereoPanner(); pan.pan.value = (i / (a.p.length - 1)) * 1.2 - 0.6; pan.connect(f);
+        [-9, 8].forEach((det) => {
+          const o = ctx.createOscillator(); o.type = "sawtooth"; o.frequency.value = hz(m); o.detune.value = det + (r() - 0.5) * 4;
+          const og = ctx.createGain(); og.gain.value = 0.05;
+          o.connect(og); og.connect(pan); o.start(t); o.stop(t + dur + 3.6);
+        });
+      });
+    }
+    function bajo(t, m, dur) {
+      const f = ctx.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = 380;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.9, t + 0.35);
+      g.gain.setValueAtTime(0.9, t + dur - 0.3); g.gain.linearRampToValueAtTime(0, t + dur + 0.9);
+      f.connect(g); g.connect(C.bajo.g);
+      [["sine", 0, 1], ["triangle", 12, 0.25]].forEach(([tipo, oct, niv]) => {
+        const o = ctx.createOscillator(); o.type = tipo; o.frequency.value = hz(m + oct);
+        const og = ctx.createGain(); og.gain.value = niv; o.connect(og); og.connect(f);
+        o.start(t); o.stop(t + dur + 1);
+      });
+    }
+    let lado = 1;
+    function pulso(t, m, vel) {
+      lado = -lado;
+      const f = ctx.createBiquadFilter(); f.type = "lowpass"; f.Q.value = 2.5;
+      f.frequency.setValueAtTime(2800 * vel, t); f.frequency.exponentialRampToValueAtTime(420, t + 0.32);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.5 * vel, t + 0.006);
+      g.gain.exponentialRampToValueAtTime(0.0008, t + 0.75);
+      const pan = ctx.createStereoPanner(); pan.pan.value = 0.28 * lado;
+      f.connect(g); g.connect(pan); pan.connect(C.arpegio.g);
+      [["sawtooth", -4], ["square", 5]].forEach(([tipo, det]) => {
+        const o = ctx.createOscillator(); o.type = tipo; o.frequency.value = hz(m); o.detune.value = det;
+        const og = ctx.createGain(); og.gain.value = 0.35; o.connect(og); og.connect(f);
+        o.start(t); o.stop(t + 0.8);
+      });
+    }
+    function voz(t, m, dur) {
+      const o = ctx.createOscillator(); o.setPeriodicWave(ondaSuave); o.frequency.value = hz(m);
+      const vib = ctx.createOscillator(); vib.frequency.value = 4.6 + r() * 0.8;
+      const vg = ctx.createGain(); vg.gain.setValueAtTime(0, t); vg.gain.linearRampToValueAtTime(7, t + Math.min(0.6, dur));
+      vib.connect(vg); vg.connect(o.detune);
+      const f = ctx.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = 1900;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.55, t + 0.07);
+      g.gain.setValueAtTime(0.5, t + Math.max(0.08, dur - 0.05)); g.gain.linearRampToValueAtTime(0, t + dur + 0.45);
+      o.connect(f); f.connect(g); g.connect(C.melodia.g);
+      o.start(t); vib.start(t); o.stop(t + dur + 0.5); vib.stop(t + dur + 0.5);
+    }
+    function campana(t, m) {
+      const c = ctx.createOscillator(); c.frequency.value = hz(m);
+      const mo = ctx.createOscillator(); mo.frequency.value = hz(m) * 3.5;
+      const mg = ctx.createGain(); mg.gain.setValueAtTime(hz(m) * 2.2, t); mg.gain.exponentialRampToValueAtTime(1, t + 1.6);
+      mo.connect(mg); mg.connect(c.frequency);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.4, t + 0.004);
+      g.gain.exponentialRampToValueAtTime(0.0005, t + 3.2);
+      const pan = ctx.createStereoPanner(); pan.pan.value = (r() - 0.5) * 1.2;
+      c.connect(g); g.connect(pan); pan.connect(C.campanas.g);
+      c.start(t); mo.start(t); c.stop(t + 3.3); mo.stop(t + 3.3);
+    }
+    /* Aire: ruido filtrado continuo. */
+    {
+      const n = ctx.sampleRate * 4, b = ctx.createBuffer(2, n, ctx.sampleRate);
+      for (let c = 0; c < 2; c++) { const d = b.getChannelData(c); for (let i = 0; i < n; i++) d[i] = r() * 2 - 1; }
+      const s = ctx.createBufferSource(); s.buffer = b; s.loop = true;
+      const f = ctx.createBiquadFilter(); f.type = "bandpass"; f.frequency.value = 900; f.Q.value = 0.6;
+      const lfo = ctx.createOscillator(); lfo.frequency.value = 0.05;
+      const lg = ctx.createGain(); lg.gain.value = 500; lfo.connect(lg); lg.connect(f.frequency);
+      s.connect(f); f.connect(C.aire.g); s.start(); lfo.start();
+    }
+
+    /* ---- arreglo: un ciclo de ocho compases */
+    let ciclo = 0;
+    const OPCIONALES = ["bajo", "arpegio", "melodia", "campanas", "aire"];
+    function decidir() {
+      if (op.capas) { OPCIONALES.forEach((k) => (C[k].on = op.capas.includes(k))); return; }
+      if (ciclo === 0) { C.aire.on = true; return; }
+      if (ciclo === 1) { C.bajo.on = true; C.arpegio.on = true; return; }
+      if (ciclo === 2) { C.melodia.on = true; return; }
+      const p = { bajo: [0.15, 0.6], arpegio: [0.3, 0.6], melodia: [0.4, 0.5], campanas: [0.55, 0.3], aire: [0.4, 0.4] };
+      OPCIONALES.forEach((k) => { const [salir, entrar] = p[k]; if (C[k].on ? r() < salir : r() < entrar) C[k].on = !C[k].on; });
+      const activos = ["bajo", "arpegio", "melodia", "campanas"].filter((k) => C[k].on);
+      if (activos.length === 0) C[elegir(["arpegio", "melodia"])].on = true;
+      if (activos.length === 4) C[elegir(activos)].on = false;
+    }
+    function programarCiclo(T) {
+      Object.values(C).forEach((c) => (c.antes = c.on));
+      decidir(); C.colchon.on = !op.capas || op.capas.includes("colchon");
+      Object.values(C).forEach((c) => {
+        c.g.gain.cancelScheduledValues(T);
+        c.g.gain.setTargetAtTime(c.on ? 1 : 0, T, c.on ? 2.2 : 1.6);
+      });
+      const rec = r() < 0.68 ? RECORRIDOS[0] : RECORRIDOS[1];
+      let patron = elegir(ARPEGIOS), semis = r() < 0.3, octArp = r() < 0.5 ? 0 : 12, octMel = r() < 0.6 ? 0 : 12;
+      for (let k = 0; k < 8; k++) {
+        const t = T + k * COMPAS, a = ACORDES[rec[k]], nota = (i) => a.t[i % 6] + 12 * Math.floor(i / 6);
+        const suena = (c) => c.on || (c.antes && k < 2);
+        if (k % 2 === 0) { colchon(t, a, COMPAS * 2); }
+        else if (rec[k] !== rec[k - 1]) { colchon(t, a, COMPAS); }
+        if (suena(C.bajo)) {
+          if (k % 2 === 0) bajo(t, a.b, COMPAS * (rec[k + 1] === rec[k] ? 2 : 1) - 0.1);
+          else if (rec[k] !== rec[k - 1]) bajo(t, a.b, COMPAS - 0.1);
+        }
+        if (suena(C.arpegio)) {
+          if (r() < 0.25) patron = elegir(ARPEGIOS);
+          const paso = semis ? TIEMPO / 4 : TIEMPO / 2, n = semis ? 16 : 8;
+          for (let j = 0; j < n; j++) {
+            const i = patron[j % 8]; if (i == null) continue;
+            const acento = j % (semis ? 4 : 2) === 0 ? 1 : 0.72;
+            pulso(t + j * paso + (r() - 0.5) * 0.008, nota(i) + octArp, acento);
+          }
+        }
+        if (suena(C.melodia) && r() > 0.32) {
+          let b = 0; elegir(MOTIVOS).forEach(([i, d]) => { voz(t + b * TIEMPO, nota(i) + octMel, d * TIEMPO * 0.96); b += d; });
+        }
+        if (suena(C.campanas)) {
+          for (let j = 0; j < 4; j++) if (r() < 0.22) campana(t + j * TIEMPO, nota(Math.floor(r() * 6)) + 12);
+        }
+      }
+      ciclo++;
+    }
+
+    /* ---- reloj */
+    let proximo = 0, reloj = null, sonando = false, vol = op.volumen == null ? 0.5 : op.volumen;
+    const nivel = () => Math.pow(vol, 2) * 0.9;
+    function tic() {
+      if (proximo < ctx.currentTime) proximo = ctx.currentTime + 0.15; /* tras una pausa larga, retoma sin amontonar */
+      while (proximo < ctx.currentTime + 3) { programarCiclo(proximo); proximo += CICLO; }
+    }
+    return {
+      iniciar() {
+        if (sonando) return; sonando = true;
+        const t = ctx.currentTime;
+        if (!proximo) proximo = t + 0.15;
+        maestro.gain.cancelScheduledValues(t); maestro.gain.setValueAtTime(maestro.gain.value, t);
+        maestro.gain.linearRampToValueAtTime(nivel(), t + 2.5);
+        tic(); if (op.reloj !== false) reloj = setInterval(tic, 500);
+      },
+      detener() {
+        if (!sonando) return; sonando = false;
+        const t = ctx.currentTime;
+        maestro.gain.cancelScheduledValues(t); maestro.gain.setValueAtTime(maestro.gain.value, t);
+        maestro.gain.linearRampToValueAtTime(0, t + 0.8);
+        clearInterval(reloj); reloj = null;
+      },
+      volumen(v) {
+        vol = Math.max(0, Math.min(1, v));
+        if (sonando) { const t = ctx.currentTime; maestro.gain.cancelScheduledValues(t); maestro.gain.setTargetAtTime(nivel(), t, 0.15); }
+      },
+      /* Para grabar una muestra: programa todo de una vez en un contexto fuera de línea. */
+      programarHasta(seg) { sonando = true; proximo = 0.15; maestro.gain.setValueAtTime(0, 0); maestro.gain.linearRampToValueAtTime(nivel(), 2.5); while (proximo < seg) { programarCiclo(proximo); proximo += CICLO; } },
+    };
+  }
+
+  G.MetaxuMusica = { crear, CICLO };
+})(typeof window !== "undefined" ? window : globalThis);
+/* MUSICA: fin */
+</script>
 <script>
 const MAZOS={"entorno": [{"c": "EL PAISAJE", "s": "paisaje", "n": "El cielo", "p": "Describe algo sobre el firmamento de este lugar o sobre lo que cae de él."}, {"c": "EL PAISAJE", "s": "paisaje", "n": "El relieve", "p": "Describe algo sobre las formaciones del terreno en este lugar."}, {"c": "EL PAISAJE", "s": "paisaje", "n": "Lo subterráneo", "p": "Describe algo sobre lo que hay bajo la superficie en este lugar."}, {"c": "EL PAISAJE", "s": "paisaje", "n": "Lo líquido", "p": "Describe algo sobre lo que corre o se acumula en este lugar."}, {"c": "EL PAISAJE", "s": "paisaje", "n": "Los ciclos", "p": "Describe algo sobre lo que este mundo repite."}, {"c": "EL PAISAJE", "s": "paisaje", "n": "Las irrupciones", "p": "Describe un fenómeno que, cada tanto, interrumpe y desarma lo que había en este lugar."}, {"c": "EL PAISAJE", "s": "paisaje", "n": "Lo que rige", "p": "Describe algo sobre las fuerzas que rigen la materia y la energía en este lugar."}, {"c": "EL PAISAJE", "s": "paisaje", "n": "Lo que se acaba", "p": "Describe algo sobre lo que en este lugar escasea o se agotó."}, {"c": "EL PAISAJE", "s": "paisaje", "n": "El aire", "p": "Describe algo sobre lo que llena el espacio entre las cosas en este lugar."}, {"c": "EL PAISAJE", "s": "paisaje", "n": "La luz", "p": "Describe algo sobre la luz de este lugar."}, {"c": "LO ANIMADO", "s": "animado", "n": "El número", "p": "Describe la cantidad de algo que vive en este lugar, sea animal, criatura o entidad."}, {"c": "LO ANIMADO", "s": "animado", "n": "La escala", "p": "Describe el tamaño de algo que vive en este lugar, sea animal, criatura o entidad."}, {"c": "LO ANIMADO", "s": "animado", "n": "El movimiento", "p": "Describe cómo se desplaza algo que vive en este lugar, sea animal, criatura o entidad."}, {"c": "LO ANIMADO", "s": "animado", "n": "Dónde está", "p": "Describe dónde suele estar algo que vive en este lugar, sea animal, criatura o entidad."}, {"c": "LO ANIMADO", "s": "animado", "n": "Los estados", "p": "Describe cómo algo que vive en este lugar cambia a lo largo de su vida, sea animal, criatura o entidad."}, {"c": "LO ANIMADO", "s": "animado", "n": "Su paso", "p": "Describe lo que deja atrás algo que vive en este lugar, sea animal, criatura o entidad."}, {"c": "LO ANIMADO", "s": "animado", "n": "De qué vive", "p": "Describe cómo se sustenta algo que vive en este lugar, sea animal, criatura o entidad."}, {"c": "LO ANIMADO", "s": "animado", "n": "La conducta", "p": "Describe cómo reacciona ante lo que se le acerca algo que vive en este lugar, sea animal, criatura o entidad."}, {"c": "LO ANIMADO", "s": "animado", "n": "Lo inesperadamente vivo", "p": "Describe algo que en este lugar está vivo sin parecerlo."}, {"c": "LO ANIMADO", "s": "animado", "n": "Su origen y su fin", "p": "Describe cómo aparece y cómo termina algo que vive en este lugar, sea animal, criatura o entidad."}, {"c": "LO QUE CRECE", "s": "crece", "n": "La forma", "p": "Describe el aspecto de algo que surge en este lugar, sea vegetal, hongo o formación."}, {"c": "LO QUE CRECE", "s": "crece", "n": "Las fases", "p": "Describe las etapas que atraviesa algo que surge en este lugar, sea vegetal, hongo o formación."}, {"c": "LO QUE CRECE", "s": "crece", "n": "La duración", "p": "Describe cuánto dura algo que surge en este lugar, sea vegetal, hongo o formación."}, {"c": "LO QUE CRECE", "s": "crece", "n": "El sustrato", "p": "Describe de qué se nutre algo que surge en este lugar, sea vegetal, hongo o formación."}, {"c": "LO QUE CRECE", "s": "crece", "n": "La escala", "p": "Describe el tamaño de algo que surge en este lugar, sea vegetal, hongo o formación."}, {"c": "LO QUE CRECE", "s": "crece", "n": "La cantidad", "p": "Describe cuánto hay de algo que surge en este lugar, sea vegetal, hongo o formación."}, {"c": "LO QUE CRECE", "s": "crece", "n": "Lo que se desprende", "p": "Describe lo que se desprende de algo que surge en este lugar, sea vegetal, hongo o formación."}, {"c": "LO QUE CRECE", "s": "crece", "n": "El contacto", "p": "Describe cómo responde al contacto o a la proximidad algo que surge en este lugar, sea vegetal, hongo o formación."}, {"c": "LO QUE CRECE", "s": "crece", "n": "Lo que emana", "p": "Describe lo que emana de algo que surge en este lugar, sea vegetal, hongo o formación."}, {"c": "LO QUE CRECE", "s": "crece", "n": "Dónde está", "p": "Describe dónde se encuentra algo que surge en este lugar, sea vegetal, hongo o formación."}, {"c": "LOS OTROS", "s": "otros", "n": "El aspecto", "p": "Describe algo sobre el aspecto de los que viven en las afueras."}, {"c": "LOS OTROS", "s": "otros", "n": "De qué viven", "p": "Describe algo sobre cómo se sustentan los que viven en las afueras."}, {"c": "LOS OTROS", "s": "otros", "n": "Cómo se organizan", "p": "Describe algo sobre cómo se ordenan entre sí los que viven en las afueras."}, {"c": "LOS OTROS", "s": "otros", "n": "La disposición", "p": "Describe algo sobre cómo se manejan frente a los demás los que viven en las afueras."}, {"c": "LOS OTROS", "s": "otros", "n": "El saber", "p": "Describe algo sobre lo que saben los que viven en las afueras."}, {"c": "LOS OTROS", "s": "otros", "n": "Dónde están", "p": "Describe algo sobre el lugar que habitan los que viven en las afueras."}, {"c": "LOS OTROS", "s": "otros", "n": "El origen", "p": "Describe algo sobre la procedencia de los que viven en las afueras."}, {"c": "LOS OTROS", "s": "otros", "n": "Lo que pueden", "p": "Describe algo sobre lo que son capaces de hacer sin haberlo aprendido los que viven en las afueras."}, {"c": "LOS OTROS", "s": "otros", "n": "Lo que creen", "p": "Describe algo sobre lo que creen los que viven en las afueras."}, {"c": "LOS OTROS", "s": "otros", "n": "Cuántos son", "p": "Describe algo sobre cuántos son los que viven en las afueras."}], "cultura": [{"c": "LO MATERIAL", "s": "material", "n": "Lo construido", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en algo que levantan los que viven aquí."}, {"c": "LO MATERIAL", "s": "material", "n": "La vestimenta", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en una prenda que visten los que viven aquí."}, {"c": "LO MATERIAL", "s": "material", "n": "El ornamento", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en algo con lo que adornan su cuerpo los que viven aquí."}, {"c": "LO MATERIAL", "s": "material", "n": "Las herramientas", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en un objeto con el que trabajan los que viven aquí."}, {"c": "LO MATERIAL", "s": "material", "n": "Las armas", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en un objeto con el que matan o hieren los que viven aquí."}, {"c": "LO MATERIAL", "s": "material", "n": "El transporte", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en algo con lo que cargan o se trasladan los que viven aquí."}, {"c": "LO MATERIAL", "s": "material", "n": "El registro", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en un objeto que sirve para dejar constancia de lo que no quieren olvidar los que viven aquí."}, {"c": "LO MATERIAL", "s": "material", "n": "El recipiente", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en un objeto en el que guardan cosas los que viven aquí."}, {"c": "LO MATERIAL", "s": "material", "n": "El alimento", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en algo que comen los que viven aquí."}, {"c": "LO MATERIAL", "s": "material", "n": "El vestigio", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en algo que quedó de otros y los que viven aquí encontraron."}, {"c": "LO SIMBÓLICO", "s": "simbolico", "n": "Arte", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en un objeto o actividad artística que producen los que viven aquí."}, {"c": "LO SIMBÓLICO", "s": "simbolico", "n": "Juego", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en un juego al que juegan los que viven aquí."}, {"c": "LO SIMBÓLICO", "s": "simbolico", "n": "Rito", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en un ritual que practican los que viven aquí."}, {"c": "LO SIMBÓLICO", "s": "simbolico", "n": "Mito", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en una leyenda que los que viven aquí tienen por cierta."}, {"c": "LO SIMBÓLICO", "s": "simbolico", "n": "Cuento", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en un relato o fábula que cuentan los que viven aquí."}, {"c": "LO SIMBÓLICO", "s": "simbolico", "n": "Superstición", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en algo que los que viven aquí creen sin comprobar."}, {"c": "LO SIMBÓLICO", "s": "simbolico", "n": "Rumor", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en algo que circula de boca en boca entre los que viven aquí."}, {"c": "LO SIMBÓLICO", "s": "simbolico", "n": "Tabú", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en algo que los que viven aquí no tocan, no hacen ni nombran, porque hacerlo produce vergüenza y repudio."}, {"c": "LO SIMBÓLICO", "s": "simbolico", "n": "Festividad", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en una celebración que interrumpe lo cotidiano de los que viven aquí."}, {"c": "LO SIMBÓLICO", "s": "simbolico", "n": "Lenguaje", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en las palabras, gestos o símbolos que los que viven aquí usan para nombrarlo."}, {"c": "EL HACER", "s": "hacer", "n": "Caza y pesca", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en el modo en que los que viven aquí cazan y pescan."}, {"c": "EL HACER", "s": "hacer", "n": "Cría y cultivo", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en el modo en que los que viven aquí crían y cultivan."}, {"c": "EL HACER", "s": "hacer", "n": "Elaboración", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en el modo en que los que viven aquí transforman lo que consiguen."}, {"c": "EL HACER", "s": "hacer", "n": "Construcción", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en el modo en que los que viven aquí construyen."}, {"c": "EL HACER", "s": "hacer", "n": "Comercio", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en el modo en que los que viven aquí intercambian lo que consiguen."}, {"c": "EL HACER", "s": "hacer", "n": "Los muertos", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en el modo en que los que viven aquí actúan cuando alguien muere."}, {"c": "EL HACER", "s": "hacer", "n": "El combate", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en el modo en que los que viven aquí atacan o se defienden."}, {"c": "EL HACER", "s": "hacer", "n": "Sanación", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en el modo en que los que viven aquí curan."}, {"c": "EL HACER", "s": "hacer", "n": "Enseñanza", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en el modo en que los que viven aquí enseñan."}, {"c": "EL HACER", "s": "hacer", "n": "Placer y descanso", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en el modo en que los que viven aquí pasan el tiempo libre."}, {"c": "LO NORMADO", "s": "normado", "n": "El poder", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en una regla que entre los que viven aquí ordena quién manda."}, {"c": "LO NORMADO", "s": "normado", "n": "La filiación", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en una regla que entre los que viven aquí ordena con quién se puede formar familia."}, {"c": "LO NORMADO", "s": "normado", "n": "La propiedad", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en una regla que entre los que viven aquí ordena qué puede ser de alguien."}, {"c": "LO NORMADO", "s": "normado", "n": "Las fronteras", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en una regla que entre los que viven aquí ordena quién puede entrar en cierto lugar."}, {"c": "LO NORMADO", "s": "normado", "n": "El secreto", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en una regla que entre los que viven aquí ordena qué pueden saber solo algunos."}, {"c": "LO NORMADO", "s": "normado", "n": "La necesidad", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en una regla que entre los que viven aquí ordena cuándo y cómo se satisface lo que el cuerpo pide."}, {"c": "LO NORMADO", "s": "normado", "n": "El cuerpo", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en una regla que entre los que viven aquí ordena qué se muestra del cuerpo, qué se cubre y qué se marca."}, {"c": "LO NORMADO", "s": "normado", "n": "El tributo", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en una regla que entre los que viven aquí ordena qué se entrega y a quién."}, {"c": "LO NORMADO", "s": "normado", "n": "La edad", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en una regla que entre los que viven aquí ordena qué cambia al dejar atrás una edad."}, {"c": "LO NORMADO", "s": "normado", "n": "La justicia", "p": "En la fase anterior imaginaste algo del entorno. Describe cómo eso toma forma en una regla que entre los que viven aquí ordena qué se hace con quien transgrede."}], "oraculo": [{"c": "Sí", "nu": "lo que falta", "w": ["HUECO", "INCOMPLETO", "PÉRDIDA"]}, {"c": "No", "nu": "lo que se multiplica", "w": ["RAMIFICADO", "SUCESIVO", "REPETICIÓN"]}, {"c": "Sí", "nu": "lo que se apila", "w": ["EN CAPAS", "ESCALONADO", "ACUMULACIÓN"]}, {"c": "No", "nu": "lo que se enlaza", "w": ["ENREDADO", "INSEPARABLE", "DEPENDENCIA"]}, {"c": "Sí", "nu": "lo elaborado", "w": ["DETALLADO", "TRAMA", "ARTESANÍA"]}, {"c": "No", "nu": "lo despojado", "w": ["LISO", "AUSTERO", "DESNUDEZ"]}, {"c": "Sí", "nu": "lo que queda adentro", "w": ["CERRADO", "AISLADO", "CLAUSURA"]}, {"c": "No", "nu": "lo que se escapa", "w": ["ABIERTO", "PERMEABLE", "EXPANSIÓN"]}, {"c": "Sí", "nu": "lo que no se junta", "w": ["FRAGMENTADO", "DISCONTINUO", "DIVISIÓN"]}, {"c": "No", "nu": "lo que se junta", "w": ["AMONTONADO", "MASIVO", "ENCUENTRO"]}, {"c": "Sí", "nu": "lo que rodea", "w": ["ENVUELTO", "PERIFÉRICO", "RESGUARDO"]}, {"c": "No", "nu": "lo que vuelve", "w": ["ESPIRAL", "CÍCLICO", "RETORNO"]}, {"c": "Sí", "nu": "lo que se sostiene", "w": ["ROBUSTO", "ESTABLE", "EQUILIBRIO"]}, {"c": "No", "nu": "lo que está abajo", "w": ["HUNDIDO", "SUBYACENTE", "PROFUNDIDAD"]}, {"c": "Sí", "nu": "lo llamativo", "w": ["COLORIDO", "VISTOSO", "ATRACCIÓN"]}, {"c": "No", "nu": "lo que se estira", "w": ["ALARGADO", "TENSO", "INSISTENCIA"]}, {"c": "Sí", "nu": "lo que se dobla", "w": ["CURVADO", "ARTICULADO", "FLEXIÓN"]}, {"c": "No", "nu": "lo que atraviesa", "w": ["PERFORADO", "CRUZADO", "TRANSGRESIÓN"]}, {"c": "Sí", "nu": "lo que se levanta", "w": ["ERGUIDO", "PROMINENTE", "ELEVACIÓN"]}, {"c": "No", "nu": "lo que cede", "w": ["BLANDO", "MALEABLE", "PLASTICIDAD"]}, {"c": "Sí", "nu": "lo que no cede", "w": ["DURO", "INFLEXIBLE", "OBSTINACIÓN"]}, {"c": "No", "nu": "lo que se afina", "w": ["PUNTIAGUDO", "DECRECIENTE", "REDUCCIÓN"]}, {"c": "Sí", "nu": "lo que fluye", "w": ["LÍQUIDO", "CONTINUO", "CIRCULACIÓN"]}, {"c": "No", "nu": "lo que viene de a dos", "w": ["ESPEJADO", "SIMÉTRICO", "DUALIDAD"]}, {"c": "Sí", "nu": "lo que ocupa mucho", "w": ["GRANDE", "INABARCABLE", "DESMESURA"]}, {"c": "No", "nu": "lo que ocupa poco", "w": ["PEQUEÑO", "ESCASO", "MINUCIA"]}, {"c": "Sí", "nu": "lo gastado", "w": ["AGRIETADO", "PRECARIO", "DECADENCIA"]}, {"c": "No", "nu": "lo liviano", "w": ["POROSO", "SUTIL", "LEVEDAD"]}, {"c": "Sí", "nu": "lo pesado", "w": ["MACIZO", "ARRAIGADO", "QUIETUD"]}, {"c": "No", "nu": "lo que se extingue", "w": ["FRÍO", "INERTE", "DESAPARICIÓN"]}, {"c": "No", "nu": "lo que se enciende", "w": ["CALIENTE", "AGITADO", "PROPAGACIÓN"]}, {"c": "Sí", "nu": "lo que no se ve", "w": ["OSCURO", "OCULTO", "MISTERIO"]}, {"c": "No", "nu": "lo que suena", "w": ["RUIDOSO", "RESONANTE", "ECO"]}, {"c": "Sí", "nu": "lo que no suena", "w": ["SILENCIOSO", "INADVERTIDO", "OLVIDO"]}, {"c": "Sí", "nu": "lo que se mueve", "w": ["INQUIETO", "ERRANTE", "DESPLAZAMIENTO"]}, {"c": "No", "nu": "lo que va rápido", "w": ["VELOZ", "REPENTINO", "URGENCIA"]}, {"c": "Sí", "nu": "lo que va lento", "w": ["PAUSADO", "GRADUAL", "DEMORA"]}, {"c": "No", "nu": "lo que huele", "w": ["AROMÁTICO", "DIFUSO", "EMANACIÓN"]}, {"c": "Sí", "nu": "lo árido", "w": ["SECO", "ESTÉRIL", "AGOTAMIENTO"]}, {"c": "No", "nu": "lo fecundo", "w": ["HÚMEDO", "FÉRTIL", "CRECIMIENTO"]}]};
 const SIMB={"paisaje": {"vb": "76.5 147.5 347.5 206.5", "inner": "<g transform=\"translate(250 250) scale(0.7798) translate(-235.0 -206.0)\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"12.82\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M22.0 83.6 H448.8\"/><path d=\"M22.0 330.0 H149.6 L217.8 176.0 L277.2 294.8\"/><path d=\"M264.0 264.0 L290.4 224.4 L343.2 330.0 H448.8\"/></g>", "w": 16.93, "h": 9.98}, "animado": {"vb": "86.7 190.0 326.6 145.3", "inner": "<g fill=\"none\" stroke=\"currentColor\" stroke-width=\"10.62\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M250 330 Q205 190 92 205\"/><path d=\"M250 330 Q295 190 408 205\"/></g><circle cx=\"150\" cy=\"268\" r=\"10\" fill=\"currentColor\"/><circle cx=\"350\" cy=\"268\" r=\"10\" fill=\"currentColor\"/>", "w": 20.95, "h": 8.07}, "crece": {"vb": "78.0 79.0 345.0 343.0", "inner": "<g transform=\"translate(250 250) scale(1.0429) translate(-249.0 -251.0)\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"9.59\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M91 409 H408\"/><path d=\"M249.5 409 V245\"/><path d=\"M184.5 94 V165 L249.5 245 L314.5 165 V94\"/><path d=\"M184.5 165 L122 150\"/><path d=\"M314.5 165 L377 150\"/></g>", "w": 10.06, "h": 10.0}, "otros": {"vb": "77.0 187.5 370.0 125.5", "inner": "<g transform=\"translate(250 250) scale(0.7925) translate(-284.5 -179.5)\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"12.62\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M75 180 Q299.5 40 524 180 Q299.5 320 75 180 Z\"/><circle cx=\"299.5\" cy=\"180\" r=\"36.5\" fill=\"currentColor\" stroke=\"none\"/></g>", "w": 22.0, "h": 7.3}, "material": {"vb": "100.5 79.0 300.0 343.5", "inner": "<g transform=\"translate(250 250) scale(1.2409) translate(-249.5 -247.0)\"><g fill=\"none\" stroke=\"currentColor\" stroke-width=\"8.06\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M250 115 L365 180 L250 245 L135 180 Z\"/><path d=\"M135 180 V315 L250 380 L365 315 V180\"/><path d=\"M250 245 V380\"/></g></g>", "w": 8.72, "h": 10.0}, "simbolico": {"vb": "200.5 77.5 100.0 346.0", "inner": "<g transform=\"translate(250 250) scale(0.9471) translate(-249.5 -249.5)\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"10.56\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M250 75 V165 M205 120 H295\"/><path d=\"M210 210 L290 290 M290 210 L210 290\"/><circle cx=\"250\" cy=\"380\" r=\"45\"/></g>", "w": 2.81, "h": 10.0}, "hacer": {"vb": "114.0 77.5 272.5 346.0", "inner": "<g transform=\"translate(250 250) scale(0.9214) translate(-271.5 -263.5)\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"10.85\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M200 114 V278\"/><path d=\"M265 84 V278\"/><path d=\"M333 120 V278\"/><path d=\"M132 162 V395 A49 49 0 0 0 181 444 H302.4 A49 49 0 0 0 346.4 416.5 L409.5 285 Q418 266 398 271 Q345.5 302.5 311 356\"/></g>", "w": 7.85, "h": 10.0}, "normado": {"vb": "96.0 96.0 309.5 309.5", "inner": "<g transform=\"translate(250 250) scale(1.2289) translate(-249.5 -249.5)\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"8.14\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M205 370 H130 V130 H370 V370 H295\"/></g>", "w": 10.0, "h": 10.0}, "metaxu": {"vb": "98 609 1670 1837", "inner": "<path fill=\"currentColor\" d=\"M910.7,2392.7C892.2,2353.3 883.6,2333.8 872.5,2305.5C835.1,2211.0 820.9,2141.9 824.9,2074.2C826.7,2042.8 829.9,2021.6 836.5,1997.4C838.5,1990.4 839.7,1984.3 839.3,1984.0C838.8,1983.6 834.9,1980.9 830.5,1978.0C747.7,1922.8 682.0,1838.8 639.3,1733.7C614.4,1672.4 601.9,1617.3 599.0,1556.7C594.0,1450.8 627.8,1335.4 694.8,1229.2C705.7,1212.1 705.5,1213.7 696.8,1214.5C636.2,1220.1 567.5,1245.1 513.0,1281.3C467.6,1311.4 428.3,1352.7 403.9,1395.6C383.8,1431.0 370.6,1472.7 366.0,1515.2C364.6,1529.0 364.8,1562.3 366.4,1577.0C370.5,1612.8 379.5,1648.7 393.9,1685.9C396.8,1693.2 399.0,1699.4 398.8,1699.5C398.6,1699.7 389.5,1704.1 378.5,1709.3C224.4,1782.1 173.5,1805.9 173.0,1805.3C172.6,1804.8 170.5,1800.0 168.2,1794.5C134.1,1711.6 118.4,1634.4 120.3,1558.5C120.7,1545.3 121.6,1528.0 122.5,1520.0C127.6,1472.6 139.4,1424.9 157.3,1379.5C164.9,1360.1 182.7,1324.0 193.0,1307.0C264.7,1188.2 376.8,1097.6 524.3,1039.4C600.4,1009.3 670.3,994.4 744.9,992.4C757.8,992.0 774.1,992.2 783.0,992.9C791.5,993.4 798.7,993.7 799.0,993.4C800.1,992.3 800.1,952.1 799.0,941.5C793.6,889.4 776.8,838.2 737.6,754.7C731.8,742.3 727.0,731.8 727.0,731.3C727.0,730.8 760.9,714.3 802.2,694.8C922.7,637.7 942.1,628.7 943.0,629.6C944.1,630.8 967.2,679.9 977.5,703.1C1011.1,778.4 1032.9,847.2 1040.9,902.5C1048.6,955.5 1044.7,1017.7 1030.9,1062.9C1029.8,1066.5 1029.3,1069.7 1029.7,1070.0C1030.2,1070.4 1035.7,1074.2 1042.0,1078.5C1091.6,1112.3 1136.3,1157.8 1171.7,1210.5C1194.8,1244.8 1217.4,1288.6 1233.5,1330.0C1279.6,1448.8 1282.6,1561.5 1242.9,1681.2C1226.0,1732.0 1198.0,1789.2 1166.3,1837.6L1164.6,1840.3L1174.0,1839.6C1215.6,1836.5 1267.7,1820.7 1315.3,1796.9C1382.4,1763.3 1440.2,1708.0 1470.8,1648.2C1487.1,1616.4 1497.1,1583.8 1502.5,1544.9C1505.1,1525.4 1504.7,1489.0 1501.5,1466.5C1497.0,1435.3 1488.3,1402.6 1475.0,1367.9C1472.2,1360.7 1470.1,1354.6 1470.2,1354.5C1471.2,1353.8 1693.8,1249.1 1694.8,1248.8C1696.3,1248.4 1705.2,1269.4 1714.0,1294.0C1731.7,1343.6 1742.0,1388.9 1747.2,1440.0C1748.9,1456.3 1748.9,1514.6 1747.2,1530.0C1741.8,1579.0 1731.5,1623.3 1715.5,1665.5C1679.4,1760.6 1615.5,1844.6 1526.5,1913.6C1453.4,1970.4 1352.2,2019.2 1258.6,2043.0C1203.3,2057.1 1152.6,2063.0 1100.0,2061.6C1086.5,2061.3 1074.3,2060.7 1072.8,2060.4C1070.2,2059.8 1070.2,2059.8 1069.5,2067.7C1068.3,2080.1 1069.7,2113.9 1071.9,2128.1C1079.8,2177.8 1096.4,2225.0 1134.3,2305.5C1141.1,2320.1 1142.5,2323.7 1141.3,2324.3C1139.7,2325.3 934.0,2422.5 929.4,2424.6L926.3,2425.9L910.7,2392.7ZM956.7,1764.8C994.4,1702.7 1020.0,1630.8 1027.5,1566.0C1029.2,1551.8 1029.7,1521.7 1028.5,1506.5C1023.4,1439.8 992.7,1364.7 949.3,1312.3C940.9,1302.2 920.0,1281.0 918.4,1281.0C917.3,1281.0 914.3,1285.9 902.7,1306.5C869.9,1365.0 848.0,1430.5 841.4,1490.1C839.2,1509.7 839.9,1548.8 842.8,1567.5C848.6,1604.5 858.9,1637.5 876.0,1672.7C888.5,1698.5 898.8,1715.2 914.9,1736.0C923.0,1746.6 949.7,1774.3 951.0,1773.5C951.3,1773.3 953.9,1769.4 956.7,1764.8Z\"/>"}};
@@ -326,6 +627,7 @@ function mostrar(html,arriba,ancha){
   V.dataset.vista=mostrar.vista||"";mostrar.vista="";
   document.querySelector(".barra").hidden=["entrada","celular","menu"].includes(V.dataset.vista);
   document.getElementById("pie").hidden=["entrada","celular"].includes(V.dataset.vista);
+  document.getElementById("musica").hidden=V.dataset.vista==="celular";
   V.classList.toggle("ancha",!!ancha);
   V.innerHTML=html;
   document.querySelectorAll("#barra-nav [data-accion]").forEach(b=>b.classList.toggle("activo",b.dataset.accion===V.dataset.vista));
@@ -741,6 +1043,42 @@ window.addEventListener("pagehide",guardarYa);
 document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="hidden")guardarYa()});
 document.addEventListener("focusout",ev=>{if(ev.target.dataset&&ev.target.dataset.campo)guardarYa()});
 (esCelular()?vCelular:vEntrada)();
+/* ---------- control de la música ---------- */
+(function(){
+  const K="metaxu.musica", ON='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9.5h3.2L12 5.5v13l-4.8-4H4z"/><path d="M15.5 9a4.2 4.2 0 0 1 0 6M18 6.5a7.6 7.6 0 0 1 0 11"/></svg>', OFF='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9.5h3.2L12 5.5v13l-4.8-4H4z"/><path d="M16 9.5l5 5M21 9.5l-5 5"/></svg>';
+  let pref={on:true,vol:.5};
+  try{const g=JSON.parse(localStorage.getItem(K));if(g&&typeof g==="object")pref={on:g.on!==false,vol:typeof g.vol==="number"?g.vol:.5}}catch(e){}
+  const caja=document.getElementById("musica"),boton=document.getElementById("musica-boton"),barra=document.getElementById("musica-vol");
+  let ctx=null,m=null,tSusp=null;
+  const guardarPref=()=>{try{localStorage.setItem(K,JSON.stringify(pref))}catch(e){}};
+  const esCelular=()=>document.getElementById("vista").dataset.vista==="celular";
+  function pintar(){
+    boton.innerHTML=pref.on?ON:OFF;
+    boton.setAttribute("aria-label",pref.on?"Apagar la música":"Prender la música");
+    boton.setAttribute("aria-pressed",String(pref.on));
+    barra.value=Math.round(pref.vol*100);caja.classList.toggle("apagada",!pref.on)}
+  function arrancar(){
+    if(!pref.on||esCelular())return;
+    try{
+      if(!ctx){const AC=window.AudioContext||window.webkitAudioContext;if(!AC)return;
+        ctx=new AC();m=MetaxuMusica.crear(ctx,ctx.destination,{volumen:pref.vol})}
+      clearTimeout(tSusp);
+      const ir=()=>m.iniciar();
+      if(ctx.state!=="running")ctx.resume().then(ir,()=>{});else ir();
+    }catch(e){}}
+  function parar(){if(!m)return;m.detener();clearTimeout(tSusp);tSusp=setTimeout(()=>{try{ctx.suspend()}catch(e){}},1000)}
+  function gesto(ev){
+    if(caja.contains(ev.target))return;
+    arrancar();
+    if(!pref.on||(ctx&&ctx.state==="running")){document.removeEventListener("pointerdown",gesto,true);document.removeEventListener("keydown",gesto,true)}}
+  document.addEventListener("pointerdown",gesto,true);
+  document.addEventListener("keydown",gesto,true);
+  boton.addEventListener("click",()=>{pref.on=!pref.on;guardarPref();pintar();if(pref.on)arrancar();else parar()});
+  barra.addEventListener("input",()=>{pref.vol=barra.value/100;guardarPref();if(m)m.volumen(pref.vol);
+    if(!pref.on&&pref.vol>0){pref.on=true;guardarPref();pintar();arrancar()}});
+  window.metaxuMusicaEstado=()=>({pref,ctx:ctx&&ctx.state});
+  pintar();
+})();
 </script>
 <script>
 /* La instalación solo corre cuando la app se sirve por la web. */
