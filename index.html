@@ -267,11 +267,15 @@ main.ancha{max-width:none;width:min(1180px,94vw)}
 <script>
 /* MUSICA: inicio */
 /* Música de Metaxu: kósmos.
-   Pieza generativa propia: no hay archivo de audio, la app la sintetiza mientras suena.
+   Pieza generativa propia: no hay archivo de audio, la app la sintetiza.
    Un mismo tema (re menor, 84 por minuto) armado en capas: colchón de acordes, bajo,
    arpegios, melodía, campanas y aire. Cada ciclo de ocho compases las capas entran,
    se superponen o salen al azar; los arpegios y los motivos de la melodía se eligen
    y se combinan de un repertorio fijo, así que nunca suena dos veces igual.
+   Cada ciclo se sintetiza por adelantado, fuera del tiempo real, y se reproduce ya
+   terminado, como un archivo de audio: aunque la computadora esté cargada, lo que
+   suena no depende de que el cálculo llegue a tiempo. Las colas de un ciclo
+   (reverberación, ecos, notas largas) se superponen con el comienzo del siguiente.
    Vive acá, entre las marcas MUSICA. La herramienta musica_muestra.py la extrae para grabar muestras.
    Uso:  const m = MetaxuMusica.crear(ctx, ctx.destination, {semilla});
          m.iniciar(); m.volumen(0.5); m.detener();                                  */
@@ -320,202 +324,190 @@ main.ancha{max-width:none;width:min(1180px,94vw)}
 
   const BPM = 84, TIEMPO = 60 / BPM, COMPAS = TIEMPO * 4, CICLO = COMPAS * 8;
 
-  function crear(ctx, destino, op) {
+  const COLA = 5;            /* segundos de cola que se suman a cada ciclo */
+  const CRUCE = 1.5;         /* fundido del aire entre ciclos */
+  const OPCIONALES = ["bajo", "arpegio", "melodia", "campanas", "aire"];
+  const NIVELES = { colchon: [1.6, 0.6, 0], bajo: [0.18, 0.15, 0], arpegio: [0.82, 0.45, 0.8],
+                    melodia: [0.2, 0.7, 0.6], campanas: [0.5, 0.9, 0.5], aire: [0.074, 0.8, 0] };
+
+  /* Estado que sigue de un ciclo al otro: el azar, qué capas suenan, el ruido y la reverberación. */
+  function generador(op) {
     op = op || {};
     const r = azar(op.semilla == null ? (Date.now() & 0xffffffff) : op.semilla);
     const elegir = (a) => a[Math.floor(r() * a.length)];
+    const S = { ciclo: 0, on: {}, antes: {}, lado: 1, ir: null, ruido: null, sr: 0 };
+    Object.keys(NIVELES).forEach((k) => { S.on[k] = false; S.antes[k] = false; });
 
-    /* ---- cadena de salida */
-    const mezcla = ctx.createGain(); mezcla.gain.value = 0.9;
-    const sat = ctx.createWaveShaper();
-    const curva = new Float32Array(1024);
-    for (let i = 0; i < 1024; i++) { const x = i / 511.5 - 1; curva[i] = Math.tanh(1.4 * x) / Math.tanh(1.4); }
-    sat.curve = curva;
-    const comp = ctx.createDynamicsCompressor();
-    comp.threshold.value = -20; comp.ratio.value = 3; comp.attack.value = 0.03; comp.release.value = 0.4;
-    const tono = ctx.createBiquadFilter(); tono.type = "lowpass"; tono.frequency.value = 8500;
-    const maestro = ctx.createGain(); maestro.gain.value = 0;
-    mezcla.connect(sat); sat.connect(comp); comp.connect(tono); tono.connect(maestro); maestro.connect(destino);
-
-    /* ---- reverberación generada (sin archivos) */
-    const rev = ctx.createConvolver();
-    {
-      const sr = ctx.sampleRate, L = sr * 5.5, n = Math.floor(sr * 4.2), cola = sr * 0.3, ir = ctx.createBuffer(2, n, sr);
-      for (let c = 0; c < 2; c++) {
-        const d = ir.getChannelData(c); let y = 0;
+    function materiales(sr) {
+      if (S.sr === sr) return; S.sr = sr;
+      const L = sr * 5.5, n = Math.floor(sr * 4.2), cola = sr * 0.3;
+      S.ir = [0, 1].map(() => {
+        const d = new Float32Array(n); let y = 0;
         for (let i = 0; i < n; i++) {
           const x = (r() * 2 - 1); y = y + 0.35 * (x - y);
           d[i] = y * Math.pow(1 - i / L, 2.6) * (i < sr * 0.02 ? i / (sr * 0.02) : 1) * (i > n - cola ? (n - i) / cola : 1);
         }
-      }
-      rev.buffer = ir;
-    }
-    const revVuelta = ctx.createGain(); revVuelta.gain.value = 0.55;
-    rev.connect(revVuelta); revVuelta.connect(mezcla);
-
-    /* ---- eco estéreo (corchea con puntillo) */
-    const ecoEnt = ctx.createGain(); ecoEnt.gain.value = 1;
-    const ecoI = ctx.createDelay(2), ecoD = ctx.createDelay(2);
-    ecoI.delayTime.value = TIEMPO * 0.75; ecoD.delayTime.value = TIEMPO * 1.5;
-    const ecoFiltro = ctx.createBiquadFilter(); ecoFiltro.type = "lowpass"; ecoFiltro.frequency.value = 2400;
-    const ecoVuelta = ctx.createGain(); ecoVuelta.gain.value = 0.38;
-    const panI = ctx.createStereoPanner(), panD = ctx.createStereoPanner(); panI.pan.value = -0.6; panD.pan.value = 0.6;
-    ecoEnt.connect(ecoFiltro); ecoFiltro.connect(ecoI); ecoFiltro.connect(ecoD);
-    ecoI.connect(panI); ecoD.connect(panD);
-    const ecoSal = ctx.createGain(); ecoSal.gain.value = 0.32;
-    panI.connect(ecoSal); panD.connect(ecoSal); ecoSal.connect(mezcla); ecoSal.connect(rev);
-    ecoD.connect(ecoVuelta); ecoVuelta.connect(ecoFiltro);
-
-    /* ---- capas */
-    function capa(nivel, envioRev, envioEco) {
-      const g = ctx.createGain(); g.gain.value = 0;
-      const sal = ctx.createGain(); sal.gain.value = nivel;
-      g.connect(sal); sal.connect(mezcla);
-      if (envioRev) { const s = ctx.createGain(); s.gain.value = envioRev; sal.connect(s); s.connect(rev); }
-      if (envioEco) { const s = ctx.createGain(); s.gain.value = envioEco; sal.connect(s); s.connect(ecoEnt); }
-      return { g, on: false, antes: false };
-    }
-    const C = {
-      colchon: capa(1.6, 0.6, 0),
-      bajo: capa(0.18, 0.15, 0),
-      arpegio: capa(0.82, 0.45, 0.8),
-      melodia: capa(0.2, 0.7, 0.6),
-      campanas: capa(0.5, 0.9, 0.5),
-      aire: capa(0.074, 0.8, 0),
-    };
-
-    /* ---- timbres. Cada nota suelta sus nodos al terminar, para que el grafo no crezca. */
-    function soltar(fuente, nodos) { fuente.onended = () => { nodos.forEach((n) => { try { n.disconnect(); } catch (e) {} }); }; }
-    const ondaSuave = ctx.createPeriodicWave(
-      new Float32Array([0, 0, 0, 0, 0, 0, 0]),
-      new Float32Array([0, 1, 0.42, 0.2, 0.09, 0.05, 0.02]));
-
-    function colchon(t, a, dur) {
-      const f = ctx.createBiquadFilter(); f.type = "lowpass"; f.Q.value = 0.6;
-      f.frequency.setValueAtTime(650, t); f.frequency.linearRampToValueAtTime(1350 + r() * 500, t + dur * 0.6);
-      f.frequency.linearRampToValueAtTime(800, t + dur + 3);
-      const g = ctx.createGain();
-      g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.05, t + 2.4);
-      g.gain.setValueAtTime(0.05, t + dur); g.gain.linearRampToValueAtTime(0, t + dur + 3.4);
-      f.connect(g); g.connect(C.colchon.g);
-      const nodos = [f, g]; let ultimo = null;
-      a.p.forEach((m, i) => {
-        const pan = ctx.createStereoPanner(); pan.pan.value = (i / (a.p.length - 1)) * 1.2 - 0.6; pan.connect(f); nodos.push(pan);
-        [-9, 8].forEach((det) => {
-          const o = ctx.createOscillator(); o.type = "sawtooth"; o.frequency.value = hz(m); o.detune.value = det + (r() - 0.5) * 4;
-          o.connect(pan); o.start(t); o.stop(t + dur + 3.6); nodos.push(o); ultimo = o;
-        });
+        return d;
       });
-      soltar(ultimo, nodos);
+      S.ruido = [0, 1].map(() => { const d = new Float32Array(sr * 4); for (let i = 0; i < d.length; i++) d[i] = r() * 2 - 1; return d; });
     }
-    function bajo(t, m, dur) {
-      const f = ctx.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = 380;
-      const g = ctx.createGain();
-      g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.9, t + 0.35);
-      g.gain.setValueAtTime(0.9, t + dur - 0.3); g.gain.linearRampToValueAtTime(0, t + dur + 0.9);
-      f.connect(g); g.connect(C.bajo.g);
-      const o1 = ctx.createOscillator(); o1.type = "sine"; o1.frequency.value = hz(m); o1.connect(f);
-      const o2 = ctx.createOscillator(); o2.type = "triangle"; o2.frequency.value = hz(m + 12);
-      const og = ctx.createGain(); og.gain.value = 0.25; o2.connect(og); og.connect(f);
-      o1.start(t); o2.start(t); o1.stop(t + dur + 1); o2.stop(t + dur + 1);
-      soltar(o1, [o1, o2, og, f, g]);
-    }
-    let lado = 1;
-    const panArp = [-1, 1].map((l) => { const p = ctx.createStereoPanner(); p.pan.value = 0.28 * l; p.connect(C.arpegio.g); return p; });
-    function pulso(t, m, vel) {
-      lado = -lado;
-      const f = ctx.createBiquadFilter(); f.type = "lowpass"; f.Q.value = 2.5;
-      f.frequency.setValueAtTime(2800 * vel, t); f.frequency.exponentialRampToValueAtTime(420, t + 0.32);
-      const g = ctx.createGain();
-      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.175 * vel, t + 0.006);
-      g.gain.exponentialRampToValueAtTime(0.00028, t + 0.75);
-      f.connect(g); g.connect(panArp[lado > 0 ? 1 : 0]);
-      const nodos = [f, g]; let o;
-      [["sawtooth", -4], ["square", 5]].forEach(([tipo, det]) => {
-        o = ctx.createOscillator(); o.type = tipo; o.frequency.value = hz(m); o.detune.value = det;
-        o.connect(f); o.start(t); o.stop(t + 0.8); nodos.push(o);
-      });
-      soltar(o, nodos);
-    }
-    function voz(t, m, dur) {
-      const o = ctx.createOscillator(); o.setPeriodicWave(ondaSuave); o.frequency.value = hz(m);
-      const vib = ctx.createOscillator(); vib.frequency.value = 4.6 + r() * 0.8;
-      const vg = ctx.createGain(); vg.gain.setValueAtTime(0, t); vg.gain.linearRampToValueAtTime(7, t + Math.min(0.6, dur));
-      vib.connect(vg); vg.connect(o.detune);
-      const f = ctx.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = 1900;
-      const g = ctx.createGain();
-      g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.55, t + 0.07);
-      g.gain.setValueAtTime(0.5, t + Math.max(0.08, dur - 0.05)); g.gain.linearRampToValueAtTime(0, t + dur + 0.45);
-      o.connect(f); f.connect(g); g.connect(C.melodia.g);
-      o.start(t); vib.start(t); o.stop(t + dur + 0.5); vib.stop(t + dur + 0.5);
-      soltar(o, [o, vib, vg, f, g]);
-    }
-    function campana(t, m) {
-      const c = ctx.createOscillator(); c.frequency.value = hz(m);
-      const mo = ctx.createOscillator(); mo.frequency.value = hz(m) * 3.5;
-      const mg = ctx.createGain(); mg.gain.setValueAtTime(hz(m) * 2.2, t); mg.gain.exponentialRampToValueAtTime(1, t + 1.6);
-      mo.connect(mg); mg.connect(c.frequency);
-      const g = ctx.createGain();
-      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.4, t + 0.004);
-      g.gain.exponentialRampToValueAtTime(0.0005, t + 3.2);
-      const pan = ctx.createStereoPanner(); pan.pan.value = (r() - 0.5) * 1.2;
-      c.connect(g); g.connect(pan); pan.connect(C.campanas.g);
-      c.start(t); mo.start(t); c.stop(t + 3.3); mo.stop(t + 3.3);
-      soltar(c, [c, mo, mg, g, pan]);
-    }
-    /* Aire: ruido filtrado continuo. */
-    {
-      const n = ctx.sampleRate * 4, b = ctx.createBuffer(2, n, ctx.sampleRate);
-      for (let c = 0; c < 2; c++) { const d = b.getChannelData(c); for (let i = 0; i < n; i++) d[i] = r() * 2 - 1; }
-      const s = ctx.createBufferSource(); s.buffer = b; s.loop = true;
-      const f = ctx.createBiquadFilter(); f.type = "bandpass"; f.frequency.value = 900; f.Q.value = 0.6;
-      const lfo = ctx.createOscillator(); lfo.frequency.value = 0.05;
-      const lg = ctx.createGain(); lg.gain.value = 500; lfo.connect(lg); lg.connect(f.frequency);
-      s.connect(f); f.connect(C.aire.g); s.start(); lfo.start();
+    function buffer(ctx, canales) {
+      const b = ctx.createBuffer(2, canales[0].length, ctx.sampleRate);
+      canales.forEach((d, c) => b.copyToChannel(d, c)); return b;
     }
 
-    /* ---- arreglo: un ciclo de ocho compases */
-    let ciclo = 0;
-    const OPCIONALES = ["bajo", "arpegio", "melodia", "campanas", "aire"];
     function decidir() {
-      if (op.capas) { OPCIONALES.forEach((k) => (C[k].on = op.capas.includes(k))); return; }
-      if (ciclo === 0) { C.aire.on = true; return; }
-      if (ciclo === 1) { C.bajo.on = true; C.arpegio.on = true; return; }
-      if (ciclo === 2) { C.melodia.on = true; return; }
+      const C = S.on;
+      if (op.capas) { OPCIONALES.forEach((k) => (C[k] = op.capas.includes(k))); C.colchon = op.capas.includes("colchon"); return; }
+      C.colchon = true;
+      if (S.ciclo === 0) { C.aire = true; return; }
+      if (S.ciclo === 1) { C.bajo = true; C.arpegio = true; return; }
+      if (S.ciclo === 2) { C.melodia = true; return; }
       const p = { bajo: [0.15, 0.6], arpegio: [0.3, 0.6], melodia: [0.4, 0.5], campanas: [0.55, 0.3], aire: [0.4, 0.4] };
-      OPCIONALES.forEach((k) => { const [salir, entrar] = p[k]; if (C[k].on ? r() < salir : r() < entrar) C[k].on = !C[k].on; });
-      const activos = ["bajo", "arpegio", "melodia", "campanas"].filter((k) => C[k].on);
-      if (activos.length === 0) C[elegir(["arpegio", "melodia"])].on = true;
-      if (activos.length === 4) C[elegir(activos)].on = false;
+      OPCIONALES.forEach((k) => { const [salir, entrar] = p[k]; if (C[k] ? r() < salir : r() < entrar) C[k] = !C[k]; });
+      const activos = ["bajo", "arpegio", "melodia", "campanas"].filter((k) => C[k]);
+      if (activos.length === 0) C[elegir(["arpegio", "melodia"])] = true;
+      if (activos.length === 4) C[elegir(activos)] = false;
     }
-    function programarCiclo(T) {
-      Object.values(C).forEach((c) => (c.antes = c.on));
-      decidir(); C.colchon.on = !op.capas || op.capas.includes("colchon");
-      Object.values(C).forEach((c) => {
-        c.g.gain.cancelScheduledValues(T);
-        c.g.gain.setTargetAtTime(c.on ? 1 : 0, T, c.on ? 2.2 : 1.6);
+
+    /* Sintetiza un ciclo completo (más su cola) en un contexto fuera de línea. */
+    function ciclo(sr) {
+      materiales(sr);
+      const ctx = new OfflineAudioContext(2, Math.ceil((CICLO + COLA) * sr), sr);
+      Object.keys(NIVELES).forEach((k) => (S.antes[k] = S.on[k]));
+      decidir();
+
+      /* cadena de salida */
+      const mezcla = ctx.createGain(); mezcla.gain.value = 0.9;
+      const sat = ctx.createWaveShaper(), curva = new Float32Array(1024);
+      for (let i = 0; i < 1024; i++) { const x = i / 511.5 - 1; curva[i] = Math.tanh(1.4 * x) / Math.tanh(1.4); }
+      sat.curve = curva;
+      const comp = ctx.createDynamicsCompressor();
+      comp.threshold.value = -20; comp.ratio.value = 3; comp.attack.value = 0.03; comp.release.value = 0.4;
+      const tono = ctx.createBiquadFilter(); tono.type = "lowpass"; tono.frequency.value = 8500;
+      mezcla.connect(sat); sat.connect(comp); comp.connect(tono); tono.connect(ctx.destination);
+      const rev = ctx.createConvolver(); rev.normalize = true; rev.buffer = buffer(ctx, S.ir);
+      const revVuelta = ctx.createGain(); revVuelta.gain.value = 0.55; rev.connect(revVuelta); revVuelta.connect(mezcla);
+      /* eco estéreo */
+      const ecoEnt = ctx.createGain();
+      const ecoI = ctx.createDelay(2), ecoD = ctx.createDelay(2);
+      ecoI.delayTime.value = TIEMPO * 0.75; ecoD.delayTime.value = TIEMPO * 1.5;
+      const ecoFiltro = ctx.createBiquadFilter(); ecoFiltro.type = "lowpass"; ecoFiltro.frequency.value = 2400;
+      const ecoVuelta = ctx.createGain(); ecoVuelta.gain.value = 0.38;
+      const panI = ctx.createStereoPanner(), panD = ctx.createStereoPanner(); panI.pan.value = -0.6; panD.pan.value = 0.6;
+      ecoEnt.connect(ecoFiltro); ecoFiltro.connect(ecoI); ecoFiltro.connect(ecoD);
+      ecoI.connect(panI); ecoD.connect(panD);
+      const ecoSal = ctx.createGain(); ecoSal.gain.value = 0.32;
+      panI.connect(ecoSal); panD.connect(ecoSal); ecoSal.connect(mezcla); ecoSal.connect(rev);
+      ecoD.connect(ecoVuelta); ecoVuelta.connect(ecoFiltro);
+      /* capas: arrancan donde quedaron y van hacia su nuevo estado */
+      const C = {};
+      Object.keys(NIVELES).forEach((k) => {
+        const [nivel, envioRev, envioEco] = NIVELES[k];
+        const g = ctx.createGain(); g.gain.setValueAtTime(S.antes[k] ? 1 : 0, 0);
+        g.gain.setTargetAtTime(S.on[k] ? 1 : 0, 0, S.on[k] ? 2.2 : 1.6);
+        const sal = ctx.createGain(); sal.gain.value = nivel; g.connect(sal); sal.connect(mezcla);
+        if (envioRev) { const e = ctx.createGain(); e.gain.value = envioRev; sal.connect(e); e.connect(rev); }
+        if (envioEco) { const e = ctx.createGain(); e.gain.value = envioEco; sal.connect(e); e.connect(ecoEnt); }
+        C[k] = { g, on: S.on[k], antes: S.antes[k] };
       });
-      E = { T, k: 0, rec: r() < 0.68 ? RECORRIDOS[0] : RECORRIDOS[1], patron: elegir(ARPEGIOS),
-            semis: r() < 0.3, octArp: r() < 0.5 ? 0 : 12, octMel: r() < 0.6 ? 0 : 12 };
-      ciclo++;
-    }
-    /* Un compás por vez: así solo existen los nodos de lo que está por sonar. */
-    let E = null;
-    function programarCompas() {
-      if (!E || E.k === 8) programarCiclo(E ? E.T + CICLO : proximo);
-      const { T, rec, semis, octArp, octMel } = E, k = E.k++;
+
+      /* timbres */
+      const ondaSuave = ctx.createPeriodicWave(new Float32Array(7), new Float32Array([0, 1, 0.42, 0.2, 0.09, 0.05, 0.02]));
+      function colchon(t, a, dur) {
+        const f = ctx.createBiquadFilter(); f.type = "lowpass"; f.Q.value = 0.6;
+        f.frequency.setValueAtTime(650, t); f.frequency.linearRampToValueAtTime(1350 + r() * 500, t + dur * 0.6);
+        f.frequency.linearRampToValueAtTime(800, t + dur + 3);
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.05, t + 2.4);
+        g.gain.setValueAtTime(0.05, t + dur); g.gain.linearRampToValueAtTime(0, t + dur + 3.4);
+        f.connect(g); g.connect(C.colchon.g);
+        a.p.forEach((m, i) => {
+          const pan = ctx.createStereoPanner(); pan.pan.value = (i / (a.p.length - 1)) * 1.2 - 0.6; pan.connect(f);
+          [-9, 8].forEach((det) => {
+            const o = ctx.createOscillator(); o.type = "sawtooth"; o.frequency.value = hz(m); o.detune.value = det + (r() - 0.5) * 4;
+            o.connect(pan); o.start(t); o.stop(t + dur + 3.6);
+          });
+        });
+      }
+      function bajo(t, m, dur) {
+        const f = ctx.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = 380;
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.9, t + 0.35);
+        g.gain.setValueAtTime(0.9, t + dur - 0.3); g.gain.linearRampToValueAtTime(0, t + dur + 0.9);
+        f.connect(g); g.connect(C.bajo.g);
+        const o1 = ctx.createOscillator(); o1.type = "sine"; o1.frequency.value = hz(m); o1.connect(f);
+        const o2 = ctx.createOscillator(); o2.type = "triangle"; o2.frequency.value = hz(m + 12);
+        const og = ctx.createGain(); og.gain.value = 0.25; o2.connect(og); og.connect(f);
+        o1.start(t); o2.start(t); o1.stop(t + dur + 1); o2.stop(t + dur + 1);
+      }
+      const panArp = [-1, 1].map((l) => { const p = ctx.createStereoPanner(); p.pan.value = 0.28 * l; p.connect(C.arpegio.g); return p; });
+      function pulso(t, m, vel) {
+        S.lado = -S.lado;
+        const f = ctx.createBiquadFilter(); f.type = "lowpass"; f.Q.value = 2.5;
+        f.frequency.setValueAtTime(2800 * vel, t); f.frequency.exponentialRampToValueAtTime(420, t + 0.32);
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.175 * vel, t + 0.006);
+        g.gain.exponentialRampToValueAtTime(0.00028, t + 0.75);
+        f.connect(g); g.connect(panArp[S.lado > 0 ? 1 : 0]);
+        [["sawtooth", -4], ["square", 5]].forEach(([tipo, det]) => {
+          const o = ctx.createOscillator(); o.type = tipo; o.frequency.value = hz(m); o.detune.value = det;
+          o.connect(f); o.start(t); o.stop(t + 0.8);
+        });
+      }
+      function voz(t, m, dur) {
+        const o = ctx.createOscillator(); o.setPeriodicWave(ondaSuave); o.frequency.value = hz(m);
+        const vib = ctx.createOscillator(); vib.frequency.value = 4.6 + r() * 0.8;
+        const vg = ctx.createGain(); vg.gain.setValueAtTime(0, t); vg.gain.linearRampToValueAtTime(7, t + Math.min(0.6, dur));
+        vib.connect(vg); vg.connect(o.detune);
+        const f = ctx.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = 1900;
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.55, t + 0.07);
+        g.gain.setValueAtTime(0.5, t + Math.max(0.08, dur - 0.05)); g.gain.linearRampToValueAtTime(0, t + dur + 0.45);
+        o.connect(f); f.connect(g); g.connect(C.melodia.g);
+        o.start(t); vib.start(t); o.stop(t + dur + 0.5); vib.stop(t + dur + 0.5);
+      }
+      function campana(t, m) {
+        const c = ctx.createOscillator(); c.frequency.value = hz(m);
+        const mo = ctx.createOscillator(); mo.frequency.value = hz(m) * 3.5;
+        const mg = ctx.createGain(); mg.gain.setValueAtTime(hz(m) * 2.2, t); mg.gain.exponentialRampToValueAtTime(1, t + 1.6);
+        mo.connect(mg); mg.connect(c.frequency);
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.4, t + 0.004);
+        g.gain.exponentialRampToValueAtTime(0.0005, t + 3.2);
+        const pan = ctx.createStereoPanner(); pan.pan.value = (r() - 0.5) * 1.2;
+        c.connect(g); g.connect(pan); pan.connect(C.campanas.g);
+        c.start(t); mo.start(t); c.stop(t + 3.3); mo.stop(t + 3.3);
+      }
+      /* aire: ruido filtrado; se funde con el del ciclo siguiente */
       {
-        const t = T + k * COMPAS, a = ACORDES[rec[k]], nota = (i) => a.t[i % 6] + 12 * Math.floor(i / 6);
+        const s = ctx.createBufferSource(); s.buffer = buffer(ctx, S.ruido); s.loop = true;
+        const f = ctx.createBiquadFilter(); f.type = "bandpass"; f.frequency.value = 900; f.Q.value = 0.6;
+        const lfo = ctx.createOscillator(); lfo.frequency.value = 0.05;
+        const lg = ctx.createGain(); lg.gain.value = 500; lfo.connect(lg); lg.connect(f.frequency);
+        const x = ctx.createGain();
+        x.gain.setValueAtTime(S.ciclo === 0 ? 1 : 0, 0); x.gain.linearRampToValueAtTime(1, CRUCE);
+        x.gain.setValueAtTime(1, CICLO); x.gain.linearRampToValueAtTime(0, CICLO + CRUCE);
+        s.connect(f); f.connect(x); x.connect(C.aire.g);
+        s.start(0, (S.ciclo * CICLO) % 4); s.stop(CICLO + CRUCE + 0.05); lfo.start(0); lfo.stop(CICLO + CRUCE + 0.05);
+      }
+
+      /* el arreglo del ciclo, compás por compás */
+      const rec = r() < 0.68 ? RECORRIDOS[0] : RECORRIDOS[1];
+      let patron = elegir(ARPEGIOS); const semis = r() < 0.3, octArp = r() < 0.5 ? 0 : 12, octMel = r() < 0.6 ? 0 : 12;
+      for (let k = 0; k < 8; k++) {
+        const t = k * COMPAS + 0.02, a = ACORDES[rec[k]], nota = (i) => a.t[i % 6] + 12 * Math.floor(i / 6);
         const suena = (c) => c.on || (c.antes && k < 2);
-        if (k % 2 === 0) { colchon(t, a, COMPAS * 2); }
-        else if (rec[k] !== rec[k - 1]) { colchon(t, a, COMPAS); }
+        if (C.colchon.on) {
+          if (k % 2 === 0) colchon(t, a, COMPAS * 2);
+          else if (rec[k] !== rec[k - 1]) colchon(t, a, COMPAS);
+        }
         if (suena(C.bajo)) {
           if (k % 2 === 0) bajo(t, a.b, COMPAS * (rec[k + 1] === rec[k] ? 2 : 1) - 0.1);
           else if (rec[k] !== rec[k - 1]) bajo(t, a.b, COMPAS - 0.1);
         }
         if (suena(C.arpegio)) {
-          if (r() < 0.25) E.patron = elegir(ARPEGIOS);
-          const patron = E.patron;
+          if (r() < 0.25) patron = elegir(ARPEGIOS);
           const paso = semis ? TIEMPO / 4 : TIEMPO / 2, n = semis ? 16 : 8;
           for (let j = 0; j < n; j++) {
             const i = patron[j % 8]; if (i == null) continue;
@@ -530,24 +522,40 @@ main.ancha{max-width:none;width:min(1180px,94vw)}
           for (let j = 0; j < 4; j++) if (r() < 0.22) campana(t + j * TIEMPO, nota(Math.floor(r() * 6)) + 12);
         }
       }
-      return T + k * COMPAS;
+      S.ciclo++;
+      return ctx.startRendering();
     }
+    return { ciclo };
+  }
 
-    /* ---- reloj */
-    let proximo = 0, reloj = null, sonando = false, vol = op.volumen == null ? 0.5 : op.volumen;
+  /* Reproductor: tiene siempre listo el ciclo siguiente y lo encadena sin cortes. */
+  function crear(ctx, destino, op) {
+    op = op || {};
+    const gen = generador(op);
+    const maestro = ctx.createGain(); maestro.gain.value = 0; maestro.connect(destino);
+    let horizonte = 0, sonando = false, ocupado = false, reloj = null, vol = op.volumen == null ? 0.5 : op.volumen;
     const nivel = () => Math.pow(vol, 2) * 0.9;
-    function tic() {
-      if (proximo < ctx.currentTime) { proximo = ctx.currentTime + 0.15; E = null; } /* tras una pausa larga, retoma sin amontonar */
-      while (proximo < ctx.currentTime + 2) { programarCompas(); proximo = E.T + E.k * COMPAS; }
+    async function llenar() {
+      if (ocupado) return; ocupado = true;
+      try {
+        while (sonando && horizonte < ctx.currentTime + CICLO + 4) {
+          const buf = await gen.ciclo(ctx.sampleRate);
+          let t = horizonte;
+          if (t < ctx.currentTime + 0.1) t = ctx.currentTime + 0.1; /* si se atrasó, retoma sin amontonar */
+          const s = ctx.createBufferSource(); s.buffer = buf; s.connect(maestro); s.start(t);
+          s.onended = () => s.disconnect();
+          horizonte = t + CICLO;
+        }
+      } catch (e) { /* si el navegador no puede sintetizar, la app sigue sin música */ }
+      ocupado = false;
     }
     return {
       iniciar() {
         if (sonando) return; sonando = true;
         const t = ctx.currentTime;
-        if (!proximo) proximo = t + 0.15;
         maestro.gain.cancelScheduledValues(t); maestro.gain.setValueAtTime(maestro.gain.value, t);
         maestro.gain.linearRampToValueAtTime(nivel(), t + 2.5);
-        tic(); if (op.reloj !== false) reloj = setInterval(tic, 250);
+        llenar(); if (op.reloj !== false) reloj = setInterval(llenar, 2000);
       },
       detener() {
         if (!sonando) return; sonando = false;
@@ -560,17 +568,20 @@ main.ancha{max-width:none;width:min(1180px,94vw)}
         vol = Math.max(0, Math.min(1, v));
         if (sonando) { const t = ctx.currentTime; maestro.gain.cancelScheduledValues(t); maestro.gain.setTargetAtTime(nivel(), t, 0.15); }
       },
-      /* Para grabar una muestra: programa todo de una vez en un contexto fuera de línea. */
-      programarHasta(seg) {
-        if (!sonando) { sonando = true; proximo = 0.15; maestro.gain.setValueAtTime(0, 0); maestro.gain.linearRampToValueAtTime(nivel(), 2.5); }
-        while (proximo < seg) { programarCompas(); proximo = E.T + E.k * COMPAS; }
-      },
-      /* Para medir: en un contexto fuera de línea, programa como lo haría el reloj en vivo. */
-      avanzar(t) { while (proximo < t + 2) { programarCompas(); proximo = E.T + E.k * COMPAS; } },
     };
   }
 
-  G.MetaxuMusica = { crear, CICLO };
+  /* Para grabar una muestra: encadena ciclos en un solo par de canales. */
+  async function grabar(seg, semilla, sr) {
+    const gen = generador({ semilla }), n = Math.floor(seg * sr), L = new Float32Array(n), R = new Float32Array(n);
+    for (let t = 0; t < seg; t += CICLO) {
+      const b = await gen.ciclo(sr), i0 = Math.floor(t * sr), l = b.getChannelData(0), r = b.getChannelData(1);
+      for (let i = 0; i < l.length && i0 + i < n; i++) { L[i0 + i] += l[i]; R[i0 + i] += r[i]; }
+    }
+    return [L, R];
+  }
+
+  G.MetaxuMusica = { crear, grabar, CICLO };
 })(typeof window !== "undefined" ? window : globalThis);
 /* MUSICA: fin */
 </script>
