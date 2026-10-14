@@ -1,5 +1,5 @@
 /* Service worker de Metaxu: guarda la app para abrirla sin conexión. */
-const VERSION="metaxu-v4";
+const VERSION="metaxu-v5";
 const ARCHIVOS=["./","./index.html","./manifest.webmanifest","./icono-192.png","./icono-512.png"];
 self.addEventListener("install",e=>{
   e.waitUntil(caches.open(VERSION).then(c=>c.addAll(ARCHIVOS)).then(()=>self.skipWaiting()));
